@@ -6,6 +6,21 @@ import { afterAll, beforeAll, describe, expect, it, mock, spyOn } from 'bun:test
 import { character } from '../index';
 import plugin from '../plugin';
 
+const createMockResponse = () => {
+  return {
+    statusCode: 200,
+    payload: null as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(data: any) {
+      this.payload = data;
+      return this;
+    },
+  };
+};
+
 // Set up spies on logger
 beforeAll(() => {
   spyOn(logger, 'info').mockImplementation(() => {});
@@ -103,21 +118,7 @@ describe('Integration: Plugin Agent Info API', () => {
       getAgents: async () => [{ id: '00000000-0000-0000-0000-000000000000' }],
     } as unknown as IAgentRuntime;
 
-    const mockResponse = (() => {
-      const response = {
-        statusCode: 200,
-        payload: null as any,
-        status(code: number) {
-          this.statusCode = code;
-          return this;
-        },
-        json(data: any) {
-          this.payload = data;
-          return this;
-        },
-      };
-      return response;
-    })();
+    const mockResponse = createMockResponse();
 
     await agentInfoRoute?.handler?.({} as any, mockResponse, runtimeMock);
 
@@ -132,6 +133,127 @@ describe('Integration: Plugin Agent Info API', () => {
         }),
       ])
     );
+  });
+});
+
+describe('Integration: Plugin Agent Bootstrap API', () => {
+  it('should create a telegram-ready agent via POST route', async () => {
+    const createRoute = plugin.routes?.find(
+      (route) => route.path === '/agents' && route.type === 'POST'
+    );
+    expect(createRoute).toBeDefined();
+
+    const fetchMock = mock(async () => ({
+      ok: true,
+      json: async () => ({ success: true }),
+      text: async () => '',
+    }));
+    globalThis.fetch = fetchMock as any;
+
+    const runtimeMock = {
+      character: { ...character },
+      getAgents: mock().mockResolvedValue([]),
+      createAgent: mock().mockResolvedValue(true),
+    } as unknown as IAgentRuntime;
+
+    const req = {
+      body: {
+        name: 'TG Helper',
+        prompt: 'You are a helpful assistant.',
+        telegramToken: 'fake-token',
+      },
+    };
+    const res = createMockResponse();
+
+    await createRoute?.handler?.(req as any, res, runtimeMock);
+
+    expect(runtimeMock.createAgent).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain('/start');
+    expect(res.statusCode).toBe(201);
+    expect(res.payload?.success).toBe(true);
+    expect(res.payload?.data?.telegramConfigured).toBe(true);
+    expect(res.payload?.data?.autoStart).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        status: 'started',
+      })
+    );
+
+    globalThis.fetch = originalFetch;
+  });
+
+  it('should reject duplicates by name', async () => {
+    const createRoute = plugin.routes?.find(
+      (route) => route.path === '/agents' && route.type === 'POST'
+    );
+    expect(createRoute).toBeDefined();
+
+    const fetchMock = mock();
+    globalThis.fetch = fetchMock as any;
+
+    const runtimeMock = {
+      character: { ...character },
+      getAgents: mock().mockResolvedValue([{ name: 'TG Helper' }]),
+      createAgent: mock().mockResolvedValue(true),
+    } as unknown as IAgentRuntime;
+
+    const req = {
+      body: {
+        name: 'TG Helper',
+        prompt: 'Prompt',
+        telegramToken: 'token',
+      },
+    };
+    const res = createMockResponse();
+
+    await createRoute?.handler?.(req as any, res, runtimeMock);
+
+    expect(runtimeMock.createAgent).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(409);
+    expect(res.payload?.success).toBe(false);
+    expect(res.payload?.error?.code).toBe('AGENT_EXISTS');
+
+    globalThis.fetch = originalFetch;
+  });
+
+  it('should allow disabling auto start', async () => {
+    const createRoute = plugin.routes?.find(
+      (route) => route.path === '/agents' && route.type === 'POST'
+    );
+    expect(createRoute).toBeDefined();
+
+    const fetchMock = mock();
+    globalThis.fetch = fetchMock as any;
+
+    const runtimeMock = {
+      character: { ...character },
+      getAgents: mock().mockResolvedValue([]),
+      createAgent: mock().mockResolvedValue(true),
+    } as unknown as IAgentRuntime;
+
+    const req = {
+      body: {
+        name: 'No Auto',
+        prompt: 'Prompt',
+        telegramToken: 'token',
+        autoStart: false,
+      },
+    };
+    const res = createMockResponse();
+
+    await createRoute?.handler?.(req as any, res, runtimeMock);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.payload?.data?.autoStart).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        status: 'skipped',
+      })
+    );
+
+    globalThis.fetch = originalFetch;
   });
 });
 
@@ -255,4 +377,9 @@ describeScaffolding('Integration: Project Scaffolding', () => {
       throw error;
     }
   });
+});
+const originalFetch = globalThis.fetch;
+
+afterAll(() => {
+  globalThis.fetch = originalFetch;
 });

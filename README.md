@@ -74,6 +74,28 @@ Typical response:
 This endpoint is useful for dashboards or plugins that need a snapshot of the currently running agent without poking directly at the database. Notes:
 
 - `agentId` must be provided both in the path and as a query parameter — the router uses it to scope the runtime (`...?agentId=<agent-id>`).
+- The runtime will fall back to the next free port if `3000` is occupied. Watch the `elizaos start` logs for lines like `Port 3000 is in use, using port 3001 instead`, then replace the port in your curl command accordingly.
+
+## Agent Provisioning API
+
+Need to add an agent without using the UI? Use the POST helper exposed by the starter plugin:
+
+```bash
+curl -X POST "http://localhost:3001/api/agents/<agent-id>/plugins/starter/agents?agentId=<agent-id>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "TG Helper",
+    "prompt": "You are a Telegram assistant that answers concisely.",
+    "telegramToken": "<bot-token>",
+    "bio": ["Friendly Telegram assistant"],
+    "topics": ["telegram", "support"]
+  }'
+```
+
+- `name`, `prompt`, and `telegramToken` are required.
+- Optional fields: `username`, `bio` (string or array), `topics`, `avatar`, `plugins` (extra plugin names), and `autoStart` (defaults to `true`).
+- The endpoint automatically prevents duplicate names, preloads baseline plugins (`@elizaos/plugin-sql`, `@elizaos/plugin-openai`, `@elizaos/plugin-bootstrap`, `@elizaos/plugin-telegram`, `starter`), stores the Telegram token as `settings.secrets.TELEGRAM_BOT_TOKEN`, and returns the new agent ID.
+- When `autoStart` is enabled we immediately call the server’s `/api/agents/<new-id>/start` route using the same host/port as the incoming request, so the agent comes online right after creation. Set `"autoStart": false` if you want to provision without starting yet.
 
 ## Repository Status
 

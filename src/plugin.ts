@@ -2,6 +2,7 @@ import type { Plugin } from '@elizaos/core';
 import {
   type Action,
   type ActionResult,
+  AgentStatus,
   type Content,
   type GenerateTextParams,
   type HandlerCallback,
@@ -14,6 +15,7 @@ import {
   type State,
   logger,
 } from '@elizaos/core';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -34,6 +36,51 @@ const configSchema = z.object({
       return val;
     }),
 });
+
+const createAgentSchema = z.object({
+  name: z.string().min(1, 'Agent name is required'),
+  prompt: z.string().min(1, 'System prompt is required'),
+  telegramToken: z.string().min(1, 'Telegram bot token is required'),
+  autoStart: z.boolean().optional(),
+  username: z
+    .string()
+    .min(2, 'Username must be at least 2 characters')
+    .max(32, 'Username must be at most 32 characters')
+    .optional(),
+  bio: z.union([z.string(), z.array(z.string().min(1))]).optional(),
+  topics: z.array(z.string().min(1)).optional(),
+  avatar: z.string().url('Avatar must be a valid URL').optional(),
+  plugins: z.array(z.string().min(1)).optional(),
+});
+
+const DEFAULT_PLUGINS = [
+  '@elizaos/plugin-sql',
+  '@elizaos/plugin-openai',
+  '@elizaos/plugin-bootstrap',
+  '@elizaos/plugin-telegram',
+  'starter',
+];
+
+const formatBio = (bio?: string | string[]) => {
+  if (!bio) {
+    return ['Created via API bootstrap'];
+  }
+  return Array.isArray(bio) ? bio : [bio];
+};
+
+const resolveServerBaseUrl = (req: any) => {
+  if (req?.protocol && typeof req?.get === 'function') {
+    const host = req.get('host');
+    if (host) {
+      return `${req.protocol}://${host}`;
+    }
+  }
+  if (process.env.ELIZA_SERVER_URL) {
+    return process.env.ELIZA_SERVER_URL;
+  }
+  const port = process.env.PORT ?? '3000';
+  return `http://127.0.0.1:${port}`;
+};
 
 /**
  * Example HelloWorld action
@@ -316,6 +363,146 @@ const plugin: Plugin = {
               error instanceof Error
                 ? error.message
                 : 'Unable to read agent information',
+          });
+        }
+      },
+    },
+    {
+      name: 'create-telegram-agent',
+      path: '/agents',
+      type: 'POST',
+      handler: async (req: any, res: any, runtime: IAgentRuntime) => {
+        const body = req.body ?? {};
+
+        try {
+          const parsedBody = await createAgentSchema.parseAsync(body);
+          const existingAgents = (await runtime.getAgents()) ?? [];
+          const loweredName = parsedBody.name.trim().toLowerCase();
+          const duplicate = existingAgents.some(
+            (agent) => agent.name?.trim().toLowerCase() === loweredName
+          );
+
+          if (duplicate) {
+            if (typeof res.status === 'function') {
+              res.status(409);
+            }
+            res.json({
+              success: false,
+              error: {
+                code: 'AGENT_EXISTS',
+                message: `Agent with name "${parsedBody.name}" already exists`,
+              },
+            });
+            return;
+          }
+
+          const agentId = randomUUID();
+          const now = Date.now();
+          const desiredPlugins = new Set([...DEFAULT_PLUGINS, ...(parsedBody.plugins ?? [])]);
+
+          // Telegram support must always be present for this API
+          desiredPlugins.add('@elizaos/plugin-telegram');
+
+          const agentRecord = {
+            id: agentId,
+            name: parsedBody.name,
+            username: parsedBody.username,
+            system: parsedBody.prompt,
+            bio: formatBio(parsedBody.bio),
+            topics: parsedBody.topics ?? [],
+            plugins: Array.from(desiredPlugins),
+            settings: {
+              avatar:
+                parsedBody.avatar ??
+                runtime.character.settings?.avatar ??
+                'https://elizaos.github.io/eliza-avatars/Eliza/portrait.png',
+              secrets: {
+                TELEGRAM_BOT_TOKEN: parsedBody.telegramToken,
+              },
+            },
+            enabled: true,
+            status: AgentStatus.ACTIVE,
+            createdAt: now,
+            updatedAt: now,
+          };
+
+          const created = await runtime.createAgent(agentRecord);
+
+          if (!created) {
+            throw new Error('Failed to persist agent');
+          }
+
+          let startStatus: 'skipped' | 'started' | 'failed' = 'skipped';
+          let startError: string | undefined;
+          const shouldAutoStart = parsedBody.autoStart ?? true;
+
+          if (shouldAutoStart) {
+            try {
+              const baseUrl = resolveServerBaseUrl(req);
+              const startResponse = await fetch(`${baseUrl}/api/agents/${agentId}/start`, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                },
+              });
+              if (startResponse.ok) {
+                startStatus = 'started';
+              } else {
+                startStatus = 'failed';
+                const payload = await startResponse.text();
+                startError = payload || 'Failed to start agent';
+              }
+            } catch (startErr) {
+              startStatus = 'failed';
+              startError =
+                startErr instanceof Error ? startErr.message : 'Failed to reach agent start API';
+              logger.error({ error: startErr }, 'Auto-start failed for created agent');
+            }
+          }
+
+          if (typeof res.status === 'function') {
+            res.status(201);
+          }
+
+          res.json({
+            success: true,
+            data: {
+              agentId,
+              name: parsedBody.name,
+              plugins: agentRecord.plugins,
+              telegramConfigured: true,
+              autoStart: {
+                enabled: shouldAutoStart,
+                status: startStatus,
+                error: startError,
+              },
+            },
+          });
+        } catch (error) {
+          if (error instanceof z.ZodError) {
+            if (typeof res.status === 'function') {
+              res.status(400);
+            }
+            res.json({
+              success: false,
+              error: {
+                code: 'INVALID_REQUEST',
+                message: error.issues.map((issue) => issue.message).join(', '),
+              },
+            });
+            return;
+          }
+
+          logger.error({ error }, 'Failed to create agent via API');
+          if (typeof res.status === 'function') {
+            res.status(500);
+          }
+          res.json({
+            success: false,
+            error: {
+              code: 'AGENT_CREATE_FAILED',
+              message: error instanceof Error ? error.message : 'Unknown error',
+            },
           });
         }
       },
