@@ -55,7 +55,11 @@ const helloWorldAction: Action = {
   similes: ['GREET', 'SAY_HELLO'],
   description: 'Responds with a simple hello world message',
 
-  validate: async (_runtime: IAgentRuntime, _message: Memory, _state: State): Promise<boolean> => {
+  validate: async (
+    _runtime: IAgentRuntime,
+    _message: Memory,
+    _state: State
+  ): Promise<boolean> => {
     // Always valid
     return true;
   },
@@ -203,7 +207,8 @@ const plugin: Plugin = {
     } catch (error) {
       if (error instanceof z.ZodError) {
         const errorMessages =
-          error.issues?.map((e) => e.message)?.join(', ') || 'Unknown validation error';
+          error.issues?.map((e) => e.message)?.join(', ') ||
+          'Unknown validation error';
         throw new Error(`Invalid plugin configuration: ${errorMessages}`);
       }
       throw new Error(
@@ -244,27 +249,107 @@ const plugin: Plugin = {
         });
       },
     },
+    {
+      name: 'agent-info',
+      path: '/agent-info',
+      type: 'GET',
+      handler: async (_req: any, res: any, runtime: IAgentRuntime) => {
+        try {
+          const [storedAgent, registeredAgents] = await Promise.all([
+            runtime.getAgent(runtime.agentId).catch(() => null),
+            runtime.getAgents().catch(() => []),
+          ]);
+
+          const responsePayload = {
+            success: true,
+            data: {
+              agentId: runtime.agentId,
+              name: runtime.character.name,
+              character: {
+                name: runtime.character.name,
+                bio: runtime.character.bio ?? [],
+                system: runtime.character.system,
+                topics: runtime.character.topics ?? [],
+                style: runtime.character.style ?? {},
+                settings: runtime.character.settings ?? {},
+              },
+              plugins: (runtime.plugins ?? []).map(
+                (registeredPlugin) => registeredPlugin.name
+              ),
+              actions: (runtime.actions ?? []).map((action) => action.name),
+              providers: (runtime.providers ?? []).map(
+                (provider) => provider.name
+              ),
+              services: runtime.getRegisteredServiceTypes(),
+              routes: (runtime.routes ?? []).map((route) => ({
+                name: route.name ?? null,
+                path: route.path,
+                type: route.type,
+                public: Boolean(route.public),
+              })),
+              registry: {
+                totalAgents: registeredAgents.length,
+                storedAgent: storedAgent
+                  ? {
+                      id: storedAgent.id ?? runtime.agentId,
+                      name: storedAgent.name ?? runtime.character.name,
+                      source: storedAgent.source,
+                      createdAt: storedAgent.createdAt,
+                    }
+                  : null,
+              },
+              timestamp: new Date().toISOString(),
+            },
+          };
+
+          res.json(responsePayload);
+        } catch (error) {
+          logger.error({ error }, 'Failed to handle agent info route');
+
+          if (typeof res.status === 'function') {
+            res.status(500);
+          }
+
+          res.json({
+            success: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Unable to read agent information',
+          });
+        }
+      },
+    },
   ],
   events: {
     MESSAGE_RECEIVED: [
       async (params) => {
         logger.info('MESSAGE_RECEIVED event received');
         // print the keys
-        logger.info({ keys: Object.keys(params) }, 'MESSAGE_RECEIVED param keys');
+        logger.info(
+          { keys: Object.keys(params) },
+          'MESSAGE_RECEIVED param keys'
+        );
       },
     ],
     VOICE_MESSAGE_RECEIVED: [
       async (params) => {
         logger.info('VOICE_MESSAGE_RECEIVED event received');
         // print the keys
-        logger.info({ keys: Object.keys(params) }, 'VOICE_MESSAGE_RECEIVED param keys');
+        logger.info(
+          { keys: Object.keys(params) },
+          'VOICE_MESSAGE_RECEIVED param keys'
+        );
       },
     ],
     WORLD_CONNECTED: [
       async (params) => {
         logger.info('WORLD_CONNECTED event received');
         // print the keys
-        logger.info({ keys: Object.keys(params) }, 'WORLD_CONNECTED param keys');
+        logger.info(
+          { keys: Object.keys(params) },
+          'WORLD_CONNECTED param keys'
+        );
       },
     ],
     WORLD_JOINED: [

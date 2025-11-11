@@ -86,6 +86,55 @@ describe('Integration: Character and Plugin', () => {
   });
 });
 
+describe('Integration: Plugin Agent Info API', () => {
+  it('should expose an agent-info route that returns runtime data', async () => {
+    const agentInfoRoute = plugin.routes?.find((route) => route.path === '/agent-info');
+    expect(agentInfoRoute).toBeDefined();
+
+    const runtimeMock = {
+      agentId: '00000000-0000-0000-0000-000000000000',
+      character: { ...character },
+      plugins: [plugin],
+      actions: [{ name: 'HELLO_WORLD' }],
+      providers: [{ name: 'HELLO_WORLD_PROVIDER' }],
+      routes: plugin.routes ?? [],
+      getRegisteredServiceTypes: () => ['starter'],
+      getAgent: async () => ({ id: '00000000-0000-0000-0000-000000000000', name: 'Eliza' }),
+      getAgents: async () => [{ id: '00000000-0000-0000-0000-000000000000' }],
+    } as unknown as IAgentRuntime;
+
+    const mockResponse = (() => {
+      const response = {
+        statusCode: 200,
+        payload: null as any,
+        status(code: number) {
+          this.statusCode = code;
+          return this;
+        },
+        json(data: any) {
+          this.payload = data;
+          return this;
+        },
+      };
+      return response;
+    })();
+
+    await agentInfoRoute?.handler?.({} as any, mockResponse, runtimeMock);
+
+    expect(mockResponse.statusCode).toBe(200);
+    expect(mockResponse.payload?.success).toBe(true);
+    expect(mockResponse.payload?.data.agentId).toBe(runtimeMock.agentId);
+    expect(mockResponse.payload?.data.routes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: '/agent-info',
+          type: 'GET',
+        }),
+      ])
+    );
+  });
+});
+
 describe('Integration: Runtime Initialization', () => {
   it('should create a mock runtime with character and plugin', async () => {
     // Create a custom mock runtime for this test
