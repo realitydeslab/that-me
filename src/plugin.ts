@@ -1,4 +1,5 @@
 import type { Plugin } from '@elizaos/core';
+import { SDK } from 'agent0-sdk';
 import {
   type Action,
   type ActionResult,
@@ -42,6 +43,14 @@ const createAgentSchema = z.object({
   prompt: z.string().min(1, 'System prompt is required'),
   telegramToken: z.string().min(1, 'Telegram bot token is required'),
   autoStart: z.boolean().optional(),
+  agentWallet: z
+    .string()
+    .regex(/^0x[a-fA-F0-9]{40}$/, 'Agent wallet must be a valid EVM address')
+    .optional(),
+  ensName: z
+    .string()
+    .min(3, 'ENS name must be at least 3 characters')
+    .optional(),
   username: z
     .string()
     .min(2, 'Username must be at least 2 characters')
@@ -80,6 +89,169 @@ const resolveServerBaseUrl = (req: any) => {
   }
   const port = process.env.PORT ?? '3000';
   return `http://127.0.0.1:${port}`;
+};
+
+const parseEnvBoolean = (value: string | undefined, fallback: boolean) => {
+  if (value === undefined) return fallback;
+  const normalized = value.trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+};
+
+const buildA2AEndpoint = (baseUrl: string, agentId: string) =>
+  `${baseUrl}/api/agents/${agentId}/plugins/starter/a2a-card?agentId=${agentId}`;
+
+type Agent0RegistrationSummary = {
+  attempted: boolean;
+  success: boolean;
+  agentId?: string;
+  agentURI?: string;
+  a2aEndpoint?: string;
+  error?: string;
+};
+
+type Agent0RegistrationInput = {
+  name: string;
+  description: string;
+  image: string;
+  a2aEndpoint: string;
+  mcpEndpoint?: string;
+  ensName?: string;
+  walletAddress?: string;
+  topics?: string[];
+};
+
+let cachedAgent0Sdk: SDK | null | undefined;
+
+const getAgent0Sdk = () => {
+  if (cachedAgent0Sdk !== undefined) {
+    return cachedAgent0Sdk;
+  }
+
+  const rpcUrl = process.env.AGENT0_RPC_URL;
+  const signer = process.env.AGENT0_SIGNER_KEY;
+  const chainId = Number(process.env.AGENT0_CHAIN_ID ?? '11155111');
+  const ipfs = process.env.AGENT0_IPFS ?? 'pinata';
+  const pinataJwt = process.env.AGENT0_PINATA_JWT;
+
+  if (!rpcUrl || !signer) {
+    cachedAgent0Sdk = null;
+    logger.warn('Agent0 SDK is not fully configured; skipping on-chain registration');
+    return cachedAgent0Sdk;
+  }
+
+  if (ipfs === 'pinata' && !pinataJwt) {
+    cachedAgent0Sdk = null;
+    logger.warn('Pinata JWT missing; Agent0 registration disabled');
+    return cachedAgent0Sdk;
+  }
+
+  try {
+    cachedAgent0Sdk = new SDK({
+      chainId,
+      rpcUrl,
+      signer,
+      ipfs,
+      pinataJwt,
+    });
+    return cachedAgent0Sdk;
+  } catch (error) {
+    cachedAgent0Sdk = null;
+    logger.error({ error }, 'Failed to instantiate Agent0 SDK');
+    return cachedAgent0Sdk;
+  }
+};
+
+const registerAgentWithAgent0 = async (
+  params: Agent0RegistrationInput
+): Promise<Agent0RegistrationSummary> => {
+  const a2aEndpoint = params.a2aEndpoint;
+  const sdk = getAgent0Sdk();
+  if (!sdk) {
+    return {
+      attempted: false,
+      success: false,
+      a2aEndpoint,
+      error: 'Agent0 SDK is not configured',
+    };
+  }
+
+  try {
+    const agent = sdk.createAgent(params.name, params.description, params.image);
+
+    if (params.mcpEndpoint) {
+      await agent.setMCP(
+        params.mcpEndpoint,
+        process.env.AGENT0_MCP_VERSION ?? '2025-06-18'
+      );
+    }
+
+    await agent.setA2A(
+      a2aEndpoint,
+      process.env.AGENT0_A2A_VERSION ?? '0.30'
+    );
+
+    if (params.ensName) {
+      agent.setENS(params.ensName, process.env.AGENT0_ENS_VERSION ?? '1.0');
+    }
+
+    if (params.walletAddress) {
+      const walletChain = Number(process.env.AGENT0_CHAIN_ID ?? '11155111');
+      agent.setAgentWallet(params.walletAddress, walletChain);
+    }
+
+    agent.setTrust(
+      parseEnvBoolean(process.env.AGENT0_TRUST_REPUTATION, true),
+      parseEnvBoolean(process.env.AGENT0_TRUST_CRYPTO, true)
+    );
+
+    agent.setMetadata({
+      version: process.env.AGENT0_AGENT_VERSION ?? '1.0.0',
+      topics: params.topics ?? [],
+      source: 'starter-plugin',
+    });
+
+    agent.setActive(true);
+    agent.setX402Support(false);
+
+    const registrationFile = await agent.registerIPFS();
+
+    if (registrationFile.agentId) {
+      await sdk.getAgent(registrationFile.agentId).catch(() => null);
+    }
+
+    return {
+      attempted: true,
+      success: true,
+      agentId: registrationFile.agentId,
+      agentURI: registrationFile.agentURI,
+      a2aEndpoint,
+    };
+  } catch (error) {
+    logger.error({ error }, 'Agent0 registration failed');
+    return {
+      attempted: true,
+      success: false,
+      a2aEndpoint,
+      error: error instanceof Error ? error.message : 'Unknown Agent0 error',
+    };
+  }
+};
+
+const buildA2ACardPayload = (agent: any) => {
+  return {
+    agentId: agent.id,
+    name: agent.name,
+    username: agent.username,
+    version: process.env.AGENT0_A2A_VERSION ?? '0.30',
+    description: agent.system,
+    topics: agent.topics ?? [],
+    plugins: agent.plugins ?? [],
+    avatar: agent.settings?.avatar,
+    status: agent.status ?? AgentStatus.ACTIVE,
+    createdAt: agent.createdAt,
+    updatedAt: agent.updatedAt,
+    timestamp: new Date().toISOString(),
+  };
 };
 
 /**
@@ -368,6 +540,58 @@ const plugin: Plugin = {
       },
     },
     {
+      name: 'agent-a2a-card',
+      path: '/a2a-card',
+      type: 'GET',
+      public: true,
+      handler: async (req: any, res: any, runtime: IAgentRuntime) => {
+        const requestAgentId =
+          (req?.query?.agentId as string | undefined) ??
+          (req?.params?.agentId as string | undefined) ??
+          runtime.agentId;
+
+        if (!requestAgentId) {
+          if (typeof res.status === 'function') {
+            res.status(400);
+          }
+          res.json({
+            success: false,
+            error: 'agentId is required to build an A2A card',
+          });
+          return;
+        }
+
+        try {
+          const agentRecord = await runtime.getAgent(requestAgentId);
+
+          if (!agentRecord) {
+            if (typeof res.status === 'function') {
+              res.status(404);
+            }
+            res.json({
+              success: false,
+              error: `Agent ${requestAgentId} was not found`,
+            });
+            return;
+          }
+
+          res.json({
+            success: true,
+            data: buildA2ACardPayload({ ...agentRecord, id: requestAgentId }),
+          });
+        } catch (error) {
+          logger.error({ error }, 'Failed to build A2A endpoint response');
+          if (typeof res.status === 'function') {
+            res.status(500);
+          }
+          res.json({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown A2A error',
+          });
+        }
+      },
+    },
+    {
       name: 'create-telegram-agent',
       path: '/agents',
       type: 'POST',
@@ -426,11 +650,26 @@ const plugin: Plugin = {
             updatedAt: now,
           };
 
+          const baseUrl = resolveServerBaseUrl(req);
+          const a2aEndpoint = buildA2AEndpoint(baseUrl, agentId);
+
           const created = await runtime.createAgent(agentRecord);
 
           if (!created) {
             throw new Error('Failed to persist agent');
           }
+
+          const agent0Registration = await registerAgentWithAgent0({
+            name: parsedBody.name,
+            description: parsedBody.prompt,
+            image: agentRecord.settings.avatar,
+            a2aEndpoint,
+            mcpEndpoint: process.env.AGENT0_MCP_ENDPOINT,
+            ensName: parsedBody.ensName ?? process.env.AGENT0_ENS_NAME,
+            walletAddress:
+              parsedBody.agentWallet ?? process.env.AGENT0_AGENT_WALLET,
+            topics: agentRecord.topics,
+          });
 
           let startStatus: 'skipped' | 'started' | 'failed' = 'skipped';
           let startError: string | undefined;
@@ -438,7 +677,6 @@ const plugin: Plugin = {
 
           if (shouldAutoStart) {
             try {
-              const baseUrl = resolveServerBaseUrl(req);
               const startResponse = await fetch(`${baseUrl}/api/agents/${agentId}/start`, {
                 method: 'POST',
                 headers: {
@@ -471,6 +709,8 @@ const plugin: Plugin = {
               name: parsedBody.name,
               plugins: agentRecord.plugins,
               telegramConfigured: true,
+              a2aEndpoint,
+              agent0: agent0Registration,
               autoStart: {
                 enabled: shouldAutoStart,
                 status: startStatus,

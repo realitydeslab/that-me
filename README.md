@@ -97,6 +97,31 @@ curl -X POST "http://localhost:3001/api/agents/<agent-id>/plugins/starter/agents
 - The endpoint automatically prevents duplicate names, preloads baseline plugins (`@elizaos/plugin-sql`, `@elizaos/plugin-openai`, `@elizaos/plugin-bootstrap`, `@elizaos/plugin-telegram`, `starter`), stores the Telegram token as `settings.secrets.TELEGRAM_BOT_TOKEN`, and returns the new agent ID.
 - When `autoStart` is enabled we immediately call the server’s `/api/agents/<new-id>/start` route using the same host/port as the incoming request, so the agent comes online right after creation. Set `"autoStart": false` if you want to provision without starting yet.
 
+## Agent0 On-Chain Registration & A2A cards
+
+Provisioning through the starter plugin now mirrors the [Agent0 Quick Start](https://sdk.ag0.xyz/3-examples/3-1-quick-start/) flow:
+
+- Every agent gets a self-describing A2A card at `http://<host>/api/agents/<agent-id>/plugins/starter/a2a-card?agentId=<agent-id>` with `name`, `topics`, `plugins`, avatar, timestamps, and version fields (default `0.30`).
+- The create-agent response includes `a2aEndpoint` plus an `agent0` block that details whether on-chain registration ran successfully.
+- Set these environment variables (e.g., inside `.env.local`) to enable automatic registration; leave them unset to skip while still getting the local A2A endpoint:
+
+```
+AGENT0_RPC_URL=https://sepolia.infura.io/v3/<project>
+AGENT0_SIGNER_KEY=0x<private_key>
+AGENT0_PINATA_JWT=eyJhbGciOi...
+AGENT0_CHAIN_ID=11155111
+AGENT0_IPFS=pinata            # or filecoinPin / node
+AGENT0_AGENT_WALLET=0xYourWalletAddress
+AGENT0_ENS_NAME=myagent.eth   # optional per agent request body overrides
+AGENT0_MCP_ENDPOINT=https://mcp.example.com/  # optional
+AGENT0_A2A_VERSION=0.30       # optional override
+AGENT0_TRUST_REPUTATION=true  # optional
+AGENT0_TRUST_CRYPTO=true      # optional
+AGENT0_AGENT_VERSION=1.0.0    # optional metadata tag
+```
+
+When configured, the starter plugin instantiates the Agent0 SDK, calls `setA2A` with the generated endpoint, optionally sets MCP/ENS/wallet data, and finishes with `registerIPFS()` so agents are available on-chain immediately after provisioning.
+
 ## Repository Status
 
 Today the repo hosts project docs (`README.md`, `AGENTS.md`) and the `CNAME` used for GitHub Pages. Coming directories:

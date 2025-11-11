@@ -37,6 +37,7 @@
     "@elizaos/plugin-telegram": "^1.6.2",
     "@elizaos/server": "1.6.4",
     "@tanstack/react-query": "^5.29.0",
+    "agent0-sdk": "^0.2.4",
     "clsx": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

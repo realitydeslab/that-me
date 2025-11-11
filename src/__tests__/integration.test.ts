@@ -173,6 +173,14 @@ describe('Integration: Plugin Agent Bootstrap API', () => {
     expect(res.statusCode).toBe(201);
     expect(res.payload?.success).toBe(true);
     expect(res.payload?.data?.telegramConfigured).toBe(true);
+    expect(res.payload?.data?.a2aEndpoint).toContain('/plugins/starter/a2a-card');
+    expect(res.payload?.data?.agent0).toEqual(
+      expect.objectContaining({
+        attempted: false,
+        success: false,
+        a2aEndpoint: res.payload?.data?.a2aEndpoint,
+      })
+    );
     expect(res.payload?.data?.autoStart).toEqual(
       expect.objectContaining({
         enabled: true,
@@ -254,6 +262,35 @@ describe('Integration: Plugin Agent Bootstrap API', () => {
     );
 
     globalThis.fetch = originalFetch;
+  });
+});
+
+describe('Integration: Plugin Agent A2A API', () => {
+  it('should expose an a2a-card route with agent metadata', async () => {
+    const a2aRoute = plugin.routes?.find((route) => route.path === '/a2a-card');
+    expect(a2aRoute).toBeDefined();
+
+    const runtimeMock = {
+      agentId: '1234',
+      getAgent: mock().mockResolvedValue({
+        id: '1234',
+        name: 'Test Agent',
+        system: 'Always help',
+        topics: ['care'],
+        plugins: ['starter'],
+        settings: { avatar: 'https://example.com/avatar.png' },
+      }),
+    } as unknown as IAgentRuntime;
+
+    const req = { query: { agentId: '1234' } };
+    const res = createMockResponse();
+
+    await a2aRoute?.handler?.(req as any, res, runtimeMock);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.payload?.success).toBe(true);
+    expect(res.payload?.data?.agentId).toBe('1234');
+    expect(res.payload?.data?.version).toBe(process.env.AGENT0_A2A_VERSION ?? '0.30');
   });
 });
 
